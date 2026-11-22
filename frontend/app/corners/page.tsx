@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { CircuitMap, CornerChips } from "@/components/CircuitMap";
 import { DriverLapPicker } from "@/components/DriverLapPicker";
+import { Reveal } from "@/components/Motion";
 import { SessionPicker, useSelection } from "@/components/SessionPicker";
 import {
   ConfidenceBadge,
@@ -158,7 +159,10 @@ export default function CornersPage() {
           <ErrorPanel error={analysis.error} onRetry={analysis.reload} />
         </Panel>
       ) : analysis.data ? (
-        <>
+        <Reveal
+          className="space-y-3"
+          key={`${selection.sessionKey}-${selection.driverA}-${selection.driverB}-${selection.lapA}-${selection.lapB}`}
+        >
           <div className="grid gap-3 xl:grid-cols-[minmax(0,480px)_minmax(0,1fr)]">
             <Panel
               title="Circuit map"
@@ -239,7 +243,7 @@ export default function CornersPage() {
           </Panel>
 
           {visible.length === 1 && <CornerDetail row={visible[0]} pair={pair} />}
-        </>
+        </Reveal>
       ) : null}
     </div>
   );
