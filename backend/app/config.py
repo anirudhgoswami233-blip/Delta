@@ -96,12 +96,35 @@ class Settings:
 
     cors_origins: tuple[str, ...] = ("http://localhost:3000", "http://127.0.0.1:3000")
 
+    # Origins allowed by pattern as well as by exact match. Vercel serves every
+    # deployment and branch at its own address, which no fixed list can name.
+    cors_origin_regex: str | None = None
+
     # Optional: grounded AI race-engineer reports. Absent key => the endpoint
     # returns the computed evidence bundle without narrative synthesis.
     gemma_token: str | None = field(default=None, repr=False)
     gemma_base_url: str = "http://127.0.0.1:1234/v1"
     gemma_model: str = "google/gemma-4-26b-a4b"
     gemma_timeout_seconds: float = 180.0
+
+    # Optional: the OpenF1 race agent (openf1-race) running on this machine. It
+    # publishes live readings recorded with an F1TV subscription and Claude's
+    # explanations as files; the Agent tab reads the freshest of these folders.
+    race_agent_dirs: tuple[Path, ...] = (
+        Path.home() / "openf1" / ".data" / "race-agent",
+        Path.home() / "openf1" / ".data" / "race-agent-replay",
+    )
+    # Its local control service (`openf1-race serve`), which starts and stops live
+    # and replays. If it is not running, Delta starts it from `openf1_dir`.
+    race_agent_control_url: str = "http://127.0.0.1:8010"
+    openf1_dir: Path = Path.home() / "openf1"
+
+    # A local OpenF1 query API over the race agent's own F1TV recording, e.g.
+    # http://127.0.0.1:8020/v1. Used only when public OpenF1 cannot answer, and
+    # only for requests made directly on this machine: the recording comes from
+    # a personal F1TV subscription and is never served through a tunnel or
+    # cached where a public request could read it.
+    openf1_local_url: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -115,14 +138,24 @@ def get_settings() -> Settings:
         max_retries=_env_int("OPENF1_MAX_RETRIES", 4),
     )
     origins = os.getenv("APEX_CORS_ORIGINS")
+    agent_dirs = os.getenv("DELTA_RACE_AGENT_DIRS")
     return Settings(
         provider=provider,
         cache_dir=Path(os.getenv("APEX_CACHE_DIR") or DEFAULT_CACHE_DIR),
         settle_hours=_env_float("APEX_SETTLE_HOURS", 24.0),
         empty_retry_hours=_env_float("APEX_EMPTY_RETRY_HOURS", 24.0),
         cors_origins=tuple(o.strip() for o in origins.split(",")) if origins else Settings.cors_origins,
+        cors_origin_regex=os.getenv("APEX_CORS_ORIGIN_REGEX") or None,
         gemma_token=os.getenv("GEMMA_TOKEN") or None,
         gemma_base_url=os.getenv("GEMMA_BASE_URL", Settings.gemma_base_url).rstrip("/"),
         gemma_model=os.getenv("GEMMA_MODEL", Settings.gemma_model),
         gemma_timeout_seconds=_env_float("GEMMA_TIMEOUT_SECONDS", 180.0),
+        race_agent_dirs=(
+            tuple(Path(d.strip()).expanduser() for d in agent_dirs.split(",") if d.strip())
+            if agent_dirs
+            else Settings.race_agent_dirs
+        ),
+        race_agent_control_url=os.getenv("DELTA_RACE_AGENT_URL", Settings.race_agent_control_url).rstrip("/"),
+        openf1_dir=Path(os.getenv("DELTA_OPENF1_DIR") or Settings.openf1_dir).expanduser(),
+        openf1_local_url=(os.getenv("DELTA_OPENF1_LOCAL_URL") or "").rstrip("/") or None,
     )

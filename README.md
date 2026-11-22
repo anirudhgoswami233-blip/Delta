@@ -347,6 +347,51 @@ radius recovery, unit-scale detection, start/finish-line stitching, the
 no-verdict rule, degradation slope recovery, noise rejection, and outlier
 exclusion.
 
+### The Agent tab (OpenF1 race agent)
+
+The **Agent** tab follows a session as it happens, or replays a past one: the
+timing tower, track status, every car's position on a map, telemetry for the car
+you follow, race control, team radio (transcribed, with each line attributed to the
+engineer or the driver), detected events and the live championship projection.
+Next to them, Claude explains what is happening and defines each term the first
+time it comes up. A glossary, a running story and an end-of-session debrief build
+up as the session goes on.
+
+The data does not come from OpenF1's hosted API. It comes from the separate
+`openf1` project on the same machine, which records the official live-timing feed
+with the user's own F1TV subscription and runs the race agent (`openf1-race`). Two
+parts of Delta's backend talk to it:
+
+- `/api/live/*` reads the agent's published readings (files).
+- `/api/live/control/*` forwards to the agent's local control service
+  (`openf1-race serve` on `127.0.0.1:8010`). On startup, Delta starts that service
+  from `DELTA_OPENF1_DIR` if it isn't already running.
+
+No terminal is needed. The control bar at the top of the tab:
+
+- **Live:** start or stop the live agent. With "Turn live on automatically", live
+  starts by itself when a session's window opens: 60 minutes before a race or
+  sprint, 15 minutes before other sessions. If a replay is running at that point,
+  the tab offers **Switch to live** instead of interrupting it.
+- **Replay:** pick a season, Grand Prix and session, a speed, and an optional
+  start and end minute. The session plays through the same pipeline as live.
+- **Settings:** Claude on/off and model, radio transcripts, an F1TV login button
+  when the token has expired, and the agent's log.
+
+The labels follow the rest of Delta:
+
+- **LIVE · F1TV:** the agent's readings are fresh.
+- **REPLAY:** a past session played back. It is never called live.
+- **STALE:** no update for more than 15 s.
+- Timing, telemetry and positions are `measured`, and detected events are
+  `calculated`.
+- The championship table is a projection, and radio transcripts are estimates.
+- Claude's text is marked **AI · CLAUDE**: it explains the measurements and is not
+  one itself.
+
+When the openf1 project isn't on the machine, for example on a hosted deployment,
+the tab says so instead of failing.
+
 ---
 
 ## Configuration
@@ -371,6 +416,9 @@ of them. `.env` is git-ignored, so keys kept there are not committed.
 | `GEMMA_BASE_URL` | `http://127.0.0.1:1234/v1` | Local LM Studio or HTTPS tunnel ending in `/v1` |
 | `GEMMA_MODEL` | `google/gemma-4-26b-a4b` | Exact LM Studio model ID |
 | `GEMMA_TIMEOUT_SECONDS` | 180 | Maximum model request duration |
+| `DELTA_RACE_AGENT_DIRS` | `~/openf1/.data/race-agent`, `~/openf1/.data/race-agent-replay` | Comma-separated folders the Agent tab reads |
+| `DELTA_RACE_AGENT_URL` | `http://127.0.0.1:8010` | The race agent's control service |
+| `DELTA_OPENF1_DIR` | `~/openf1` | Where Delta finds the openf1 project to start the control service |
 
 ### Frontend
 

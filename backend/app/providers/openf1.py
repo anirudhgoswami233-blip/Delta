@@ -17,7 +17,9 @@ Notes that drove the design here:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, TypeVar
 
@@ -41,7 +43,17 @@ from ..models import (
     TeamRadio,
     Weather,
 )
-from .base import ProviderCapabilities, ProviderError
+from .base import LiveLockError, ProviderCapabilities, ProviderError
+
+log = logging.getLogger("apex.openf1")
+
+# True while handling a request made directly on this machine (not through a
+# tunnel or proxy). Set per request by middleware in main.py; only such
+# requests may be answered from the local F1TV recording.
+direct_local_request: ContextVar[bool] = ContextVar("direct_local_request", default=False)
+
+# How long after OpenF1's last live-session refusal the lock is assumed to hold.
+LIVE_LOCK_MEMORY_SECONDS = 300.0
 
 T = TypeVar("T")
 
@@ -133,8 +145,52 @@ class OpenF1Provider:
             follow_redirects=True,
         )
         self._session_meta: dict[int, Session] = {}
+        self._borrowed: dict[tuple[int, bool], list[Driver]] = {}
+        self._live_lock_seen_at: float | None = None
         # Upstream HTTP attempts made by this process; cache hits do not count.
         self.upstream_requests = 0
+        self._local_url = settings.openf1_local_url
+        self._local_client = (
+            httpx.AsyncClient(base_url=self._local_url, timeout=self._cfg.timeout_seconds)
+            if self._local_url
+            else None
+        )
+
+    # -- local recording ---------------------------------------------------
+
+    def local_recording_allowed(self) -> bool:
+        return self._local_client is not None and direct_local_request.get()
+
+    def live_lock_active(self) -> bool:
+        """Whether OpenF1 refused a request because of a live session in the last few minutes."""
+        seen = self._live_lock_seen_at
+        return seen is not None and time.monotonic() - seen < LIVE_LOCK_MEMORY_SECONDS
+
+    async def _get_local(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """Ask the local OpenF1 API over the race agent's F1TV recording.
+
+        Returns None when it is not allowed for this request, not running, or
+        answers with anything but rows. Its answers are never cached.
+        """
+        if not self.local_recording_allowed():
+            return None
+        try:
+            response = await self._local_client.get(path, params=params)
+        except httpx.HTTPError:
+            return None
+        if response.status_code == 404:
+            return []
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return payload if isinstance(payload, list) else None
+
+    async def local_recording_has(self, session_key: int) -> bool:
+        rows = await self._get_local("/sessions", {"session_key": session_key})
+        return bool(rows)
 
     # -- capabilities ------------------------------------------------------
 
@@ -213,6 +269,21 @@ class OpenF1Provider:
                     continue
 
                 if response.status_code in (401, 403):
+                    # While any F1 session is live, OpenF1 refuses every
+                    # unauthenticated request, past sessions included, and says
+                    # so in its detail. Anything already cached keeps working.
+                    try:
+                        detail = str(response.json().get("detail") or "")
+                    except (ValueError, AttributeError):
+                        detail = ""
+                    if "live" in detail.lower() and "session" in detail.lower():
+                        self._live_lock_seen_at = time.monotonic()
+                        raise LiveLockError(
+                            "OpenF1 is limiting free access while a live F1 session is running, "
+                            "and this data is not saved yet. It returns about 30 minutes after "
+                            "the session ends; everything already saved keeps working meanwhile.",
+                            status=response.status_code,
+                        )
                     raise ProviderError(
                         "OpenF1 refused the request. Live-window data requires a Sponsor key in "
                         "OPENF1_API_KEY; historical data should need none.",
@@ -254,7 +325,22 @@ class OpenF1Provider:
 
             raise ProviderError(f"OpenF1 request failed after retries: {last_error}")
 
-        data = await self._cache.single_flight(path, params, fetch)
+        try:
+            data = await self._cache.single_flight(path, params, fetch)
+        except ProviderError as exc:
+            # OpenF1 stays the source in every normal case. The local recording
+            # stands in only while OpenF1 itself refuses because a session is live.
+            local = await self._get_local(path, params) if isinstance(exc, LiveLockError) else None
+            if local is not None:
+                log.info("OpenF1 unavailable for %s; answered from the local F1TV recording", path)
+                return local
+            stale = self._cache.get_stale(path, params)
+            if stale is None:
+                raise
+            log.warning("OpenF1 unavailable for %s; serving the last good copy", path)
+            # Hold it briefly so a page's burst of requests does not retry upstream each time.
+            self._cache.set_memory(path, params, stale, self._settings.recent_cache_seconds)
+            return stale
         self._store(path, params, data, policy)
         return data
 
@@ -266,6 +352,8 @@ class OpenF1Provider:
                 self._cache.set_disk_empty(path, params, self._settings.empty_retry_hours * 3600)
         elif policy == "recent":
             self._cache.set_memory(path, params, data, self._settings.recent_cache_seconds)
+            if data:
+                self._cache.set_stale(path, params, data)
         else:
             self._cache.set_memory(path, params, data, self._settings.live_cache_seconds)
 
@@ -350,10 +438,65 @@ class OpenF1Provider:
         rows = await self._get(
             "/drivers", {"session_key": session_key}, policy=await self._policy_for(session_key)
         )
-        drivers = self._parse(Driver, rows)
+        drivers = self._unique_drivers(rows)
+        if drivers:
+            return drivers
+        return await self._borrowed_drivers(session_key)
+
+    def _unique_drivers(self, rows: list[dict[str, Any]]) -> list[Driver]:
         # The feed can repeat a driver across updates; last entry wins.
-        unique: dict[int, Driver] = {d.driver_number: d for d in drivers}
+        unique: dict[int, Driver] = {d.driver_number: d for d in self._parse(Driver, rows)}
         return sorted(unique.values(), key=lambda d: d.driver_number)
+
+    async def _borrowed_drivers(self, session_key: int) -> list[Driver]:
+        """A driver list for a session whose own list is missing.
+
+        The live feed sends names and teams only once, when a recording first
+        connects; a recording that joins mid-session has lap times and
+        telemetry but no names. The line-up barely changes between sessions, so
+        the most recent earlier list is borrowed, limited to the cars that
+        actually ran here. Only data already on this machine is searched, so
+        this never spends the public rate limit.
+        """
+        # Keyed by whether the local recording may be used, so a borrowed list
+        # never crosses from a local request to a public one.
+        memo_key = (session_key, self.local_recording_allowed())
+        if memo_key in self._borrowed:
+            return self._borrowed[memo_key]
+        present = {lap.driver_number for lap in await self.laps(session_key)}
+        if not present:
+            return []
+
+        # Earlier lists already on disk, newest session first...
+        candidates: dict[int, list[dict[str, Any]]] = {}
+        for earlier in range(session_key - 1, session_key - 40, -1):
+            params = {"session_key": earlier}
+            rows = self._cache.get_disk("/drivers", params) or self._cache.get_stale("/drivers", params)
+            if rows:
+                candidates[earlier] = rows
+        # ...plus the local recording's, fetched in one request: its API allows
+        # only 30 requests per 10 s, and a page load already makes several.
+        local_rows = (
+            await self._get_local("/drivers", {"session_key<": session_key}) or []
+            if self.live_lock_active()
+            else []
+        )
+        for row in local_rows:
+            if isinstance(row.get("session_key"), int):
+                candidates.setdefault(row["session_key"], []).append(row)
+
+        result = [Driver(driver_number=n, session_key=session_key) for n in sorted(present)]
+        for earlier in sorted(candidates, reverse=True):
+            found = [d for d in self._unique_drivers(candidates[earlier]) if d.driver_number in present]
+            if not found:
+                continue
+            known = {d.driver_number for d in found}
+            found += [Driver(driver_number=n, session_key=session_key) for n in present - known]
+            log.info("Session %s has no driver list; borrowed names from session %s", session_key, earlier)
+            result = sorted(found, key=lambda d: d.driver_number)
+            break
+        self._borrowed[memo_key] = result
+        return result
 
     async def laps(self, session_key: int, driver_number: int | None = None) -> list[Lap]:
         policy = await self._policy_for(session_key)
@@ -463,6 +606,8 @@ class OpenF1Provider:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        if self._local_client is not None:
+            await self._local_client.aclose()
 
     def cache_stats(self) -> dict[str, int | str]:
         return {**self._cache.stats(), "upstream_requests_this_process": self.upstream_requests}

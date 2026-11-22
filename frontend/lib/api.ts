@@ -576,3 +576,267 @@ export const api = {
       body: JSON.stringify(body),
     }),
 };
+
+/* ------------------------------------------------------------------ */
+/* Live tab (OpenF1 race agent running on this machine)               */
+/* ------------------------------------------------------------------ */
+
+export interface LiveSector {
+  value: string | null;
+  pb: boolean;
+  fastest: boolean;
+}
+
+export interface LiveDriver {
+  num: string;
+  tla: string;
+  name?: string | null;
+  team?: string | null;
+  team_colour?: string | null;
+  pos: number;
+  gap: string;
+  interval: string;
+  catching: boolean;
+  last_lap: string;
+  last_pb: boolean;
+  last_fastest: boolean;
+  best_lap: string;
+  laps?: number | null;
+  pits: number;
+  in_pit: boolean;
+  pit_out: boolean;
+  retired: boolean;
+  stopped: boolean;
+  knocked_out: boolean;
+  compound: string;
+  tyre_new: boolean;
+  tyre_age?: number | null;
+  stints: { compound: string; laps?: number | null; new: boolean }[];
+  sectors: LiveSector[];
+  speed_trap?: string | null;
+  best_speed_trap?: string | null;
+  telemetry: {
+    speed: number | null;
+    rpm: number | null;
+    n_gear: number | null;
+    throttle: number | null;
+    brake: number | null;
+    drs: number | null;
+    date: string | null;
+  } | null;
+  position: { x: number | null; y: number | null; z: number | null; date: string | null } | null;
+}
+
+export interface LiveRaceControl {
+  utc?: string | null;
+  lap?: number | null;
+  category?: string | null;
+  flag?: string | null;
+  scope?: string | null;
+  sector?: number | null;
+  driver?: number | string | null;
+  message?: string | null;
+}
+
+export type LiveEventCategory =
+  | "overtake" | "positions" | "pit" | "race_control" | "flag" | "pace" | "fight"
+  | "incident" | "weather" | "radio" | "lap" | "session" | "other";
+
+export interface LiveEvent {
+  clock?: string | null;
+  lap?: number | null;
+  category: LiveEventCategory;
+  label: string;
+  flag?: string | null;
+  text: string;
+  drivers: string[];
+  raw: string;
+}
+
+export interface LiveRadioTurn {
+  speaker: "engineer" | "driver" | "unclear";
+  text: string;
+}
+
+export interface LiveRadio {
+  utc?: string | null;
+  driver: string;
+  tla?: string | null;
+  url?: string | null;
+  lap?: number | null;
+  status: "queued" | "transcribing" | "labelling" | "done" | "transcribed" | "no_speech" | "failed" | "unavailable" | "off" | "not_queued";
+  turns: LiveRadioTurn[];
+  meaning?: string | null;
+  confidence?: "high" | "medium" | "low" | null;
+  duration?: number | null;
+}
+
+export interface LiveState {
+  available: boolean;
+  reason?: string;
+  source?: string;
+  age_seconds?: number | null;
+  stale?: boolean;
+  mode?: "live" | "replay";
+  updated_at?: string;
+  feed_clock?: string | null;
+  session_key?: number | null;
+  session?: {
+    meeting?: string | null;
+    circuit?: string | null;
+    session?: string | null;
+    type?: string | null;
+    lap?: number | null;
+    total_laps?: number | null;
+    track_status?: string;
+    track_message?: string | null;
+    status?: string | null;
+    remaining?: string | null;
+  };
+  track_status_label?: string | null;
+  weather?: Record<string, string | number | null>;
+  drivers?: LiveDriver[];
+  race_control?: LiveRaceControl[];
+  team_radio?: LiveRadio[];
+  events?: LiveEvent[];
+  championship?: {
+    num: string;
+    tla: string;
+    predicted_position?: number | null;
+    predicted_points?: number | null;
+    current_position?: number | null;
+    current_points?: number | null;
+  }[];
+  track_outline?: [number, number][] | null;
+  story?: string;
+  glossary_count?: number;
+  commentary_count?: number;
+  debrief_ready?: boolean;
+  agent?: {
+    model?: string | null;
+    dry_run?: boolean;
+    busy?: boolean;
+    claude_calls?: number;
+    cost_usd?: number;
+    radio_cost_usd?: number;
+    radio_transcription?: boolean;
+    finished?: boolean;
+    waiting_for_data?: boolean;
+    waiting_reason?: string | null;
+  };
+}
+
+export interface LiveCommentary {
+  i: number;
+  at: string;
+  clock?: string | null;
+  lap?: number | null;
+  total_laps?: number | null;
+  headline: string;
+  commentary: string;
+  terms: { term: string; explanation: string }[];
+  watch_next?: string | null;
+  events: string[];
+}
+
+export interface LiveTelemetry {
+  available: boolean;
+  driver: string;
+  updated_at?: string;
+  samples: Record<string, (number | string | null)[]>;
+}
+
+export const liveApi = {
+  state: () => request<LiveState>("/api/live/state"),
+  commentary: (after = 0) =>
+    request<{ available: boolean; session_key?: number; items: LiveCommentary[] }>(
+      `/api/live/commentary?after=${after}`,
+    ),
+  glossary: () =>
+    request<{ available: boolean; terms: { term: string; explanation: string }[] }>(
+      "/api/live/glossary",
+    ),
+  telemetry: (driver: string) =>
+    request<LiveTelemetry>(`/api/live/telemetry?driver=${encodeURIComponent(driver)}`),
+  debrief: () => request<{ available: boolean; markdown: string | null }>("/api/live/debrief"),
+};
+
+/* Agent control: start/stop live and replays (race agent control service). */
+
+export interface AgentSessionRef {
+  session_key: number;
+  meeting_key?: number | null;
+  meeting_name?: string | null;
+  session_name?: string | null;
+  session_type?: string | null;
+  date_start?: string | null;
+  date_end?: string | null;
+  window_opens?: string;
+  window_closes?: string;
+  year?: number | null;
+  duration_minutes?: number | null;
+}
+
+export interface AgentSettings {
+  auto_live: boolean;
+  model: "sonnet" | "opus" | "haiku";
+  interval: number;
+  radio: boolean;
+  claude: boolean;
+}
+
+export interface AgentJob {
+  kind: "live" | "replay";
+  pid: number;
+  started_at: string;
+  running: boolean;
+  params: {
+    model?: string;
+    claude?: boolean;
+    reason?: string;
+    speed?: number;
+    from_minute?: number;
+    until_minute?: number | null;
+    session?: AgentSessionRef | null;
+  };
+}
+
+export interface AgentStatus {
+  available: boolean;
+  reason?: string;
+  pending?: string | null;
+  job?: AgentJob | null;
+  last_job?: (AgentJob & { exit_code?: number | null }) | null;
+  live_session?: AgentSessionRef | null;
+  live_available?: boolean;
+  auto_live_suppressed?: boolean;
+  next_session?: AgentSessionRef | null;
+  settings?: AgentSettings;
+  token?: { valid: boolean; expires_at?: string | null; product?: string | null };
+  login_in_progress?: boolean;
+  radio_transcription?: boolean;
+  events?: { at: string; message: string }[];
+}
+
+export interface ReplayOptions {
+  session_key: number;
+  speed: number;
+  from_minute: number;
+  until_minute?: number | null;
+}
+
+export const agentControl = {
+  status: () => request<AgentStatus>("/api/live/control/status"),
+  sessions: (year?: number) =>
+    request<{ available: boolean; reason?: string; sessions: AgentSessionRef[] }>(
+      `/api/live/control/sessions${year ? `?year=${year}` : ""}`,
+    ),
+  startLive: () => request<AgentStatus>("/api/live/control/live", { method: "POST", body: "{}" }),
+  startReplay: (options: ReplayOptions) =>
+    request<AgentStatus>("/api/live/control/replay", { method: "POST", body: JSON.stringify(options) }),
+  stop: () => request<AgentStatus>("/api/live/control/stop", { method: "POST" }),
+  settings: (settings: AgentSettings) =>
+    request<AgentStatus>("/api/live/control/settings", { method: "POST", body: JSON.stringify(settings) }),
+  login: () => request<AgentStatus>("/api/live/control/login", { method: "POST" }),
+  log: (lines = 80) => request<{ available: boolean; lines: string[] }>(`/api/live/control/log?lines=${lines}`),
+};

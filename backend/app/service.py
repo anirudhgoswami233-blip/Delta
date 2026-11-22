@@ -152,9 +152,22 @@ class SessionService:
             and self.provider.is_live_window(session)
         )
 
+        tier = getattr(self.settings.provider, "tier", "community")
         if in_window and caps.live:
             mode = "live"
             reason = None
+        elif (
+            in_window
+            and self.provider.local_recording_allowed()
+            and self.provider.live_lock_active()
+            and await self.provider.local_recording_has(session_key)
+        ):
+            mode = "live"
+            tier = "local F1TV recording"
+            reason = (
+                "Live from your own F1TV recording on this machine. It is only shown here, "
+                "never through the public site."
+            )
         elif in_window and not caps.live:
             mode = "historical"
             reason = (
@@ -167,7 +180,7 @@ class SessionService:
 
         return FeedStatus(
             provider=caps.name,
-            tier=getattr(self.settings.provider, "tier", "community"),
+            tier=tier,
             mode=mode,
             live_access=caps.live,
             session_key=session_key,

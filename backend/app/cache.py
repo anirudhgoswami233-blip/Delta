@@ -104,6 +104,40 @@ class ResponseCache:
         """Remember that a request returned no rows, but only for ``ttl_seconds``."""
         self.set_disk(url, params, {"empty_until": time.time() + ttl_seconds})
 
+    # -- last-good copies --------------------------------------------------
+    #
+    # Answers that may still change (the current season's calendar, a session
+    # that has not settled) are never cached permanently. Their latest copy is
+    # kept here instead, apart from the permanent tier, and is served only when
+    # the provider cannot answer, so an outage degrades to slightly old data
+    # rather than an error.
+
+    def _stale_path(self, url: str, params: dict[str, Any]) -> Path:
+        k = _key(url, params)
+        return self._dir / "last-good" / k[:2] / f"{k}.json.gz"
+
+    def get_stale(self, url: str, params: dict[str, Any]) -> Any | None:
+        path = self._stale_path(url, params)
+        if not path.exists():
+            return None
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+            return None
+
+    def set_stale(self, url: str, params: dict[str, Any], value: Any) -> None:
+        path = self._stale_path(url, params)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        try:
+            with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                json.dump(value, fh, default=str)
+            tmp.replace(path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+
     # -- request coalescing ------------------------------------------------
 
     async def single_flight(self, url: str, params: dict[str, Any], factory):
@@ -135,9 +169,12 @@ class ResponseCache:
 
     def stats(self) -> dict[str, int | str]:
         files = list(self._dir.rglob("*.json.gz")) if self._dir.exists() else []
+        last_good = self._dir / "last-good"
+        permanent = [f for f in files if last_good not in f.parents]
         return {
             "directory": str(self._dir.resolve()),
             "memory_entries": len(self._memory),
-            "disk_entries": len(files),
-            "disk_bytes": sum(f.stat().st_size for f in files),
+            "disk_entries": len(permanent),
+            "disk_bytes": sum(f.stat().st_size for f in permanent),
+            "last_good_entries": len(files) - len(permanent),
         }

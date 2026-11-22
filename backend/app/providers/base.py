@@ -96,6 +96,10 @@ class CapabilityError(ProviderError):
     """The request is valid but this provider structurally cannot answer it."""
 
 
+class LiveLockError(ProviderError):
+    """The provider refuses free access because a live F1 session is running."""
+
+
 @runtime_checkable
 class TelemetryProvider(Protocol):
     capabilities: ProviderCapabilities
