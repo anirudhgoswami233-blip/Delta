@@ -1,0 +1,9 @@
+# Only the Next.js frontend deploys to Vercel; the backend runs elsewhere.
+backend/
+**/node_modules
+**/.next
+# Local settings and secrets. .env.local points the frontend at
+# 127.0.0.1:8000 for development and must not reach the production build.
+**/.env
+**/.env.*
+!**/.env.example
